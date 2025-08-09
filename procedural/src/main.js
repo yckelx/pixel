@@ -35,10 +35,21 @@ class ProceduralZoomViewer {
         this.isRendering = false;
         this.needsRender = false;
         
+        // Performance: cache de posições calculadas
+        this.gridPositions = new Map(); // imageId -> {gridX, gridY, isVisible}
+        this.gridSize = 32;
+        
+        // Performance: dirty rectangle system
+        this.lastRenderedStage = -1;
+        this.frameCounter = 0;
+        
         this.setupCallbacks();
         
         // Adicionar alguns pixels de teste para demonstrar o sistema híbrido
         this.addTestPixels();
+        
+        // Performance: iniciar loading em background
+        this.startBackgroundLoader();
         
         this.requestRender();
     }
@@ -90,7 +101,7 @@ class ProceduralZoomViewer {
         this.requestRender();
     }
 
-    async handleStageChange(direction, absoluteStage) {
+    handleStageChange(direction, absoluteStage) {
         let newStage;
         if (absoluteStage !== undefined) {
             newStage = absoluteStage;
@@ -102,38 +113,17 @@ class ProceduralZoomViewer {
         newStage = Math.max(1, Math.min(4, newStage));
         
         if (newStage !== this.stageRenderer.stage) {
-            const fromStage = this.stageRenderer.stage;
-            
-            // Iniciar animação
-            this.stageRenderer.setAnimating(true);
-            
-            // Animar transição suave
-            const animation = this.animationManager.animateStageTransition(fromStage, newStage, 400);
-            
-            // Configurar callback para atualizar durante a animação
-            let animId = null;
-            for (const [id, anim] of this.animationManager.activeAnimations) {
-                if (anim.type === 'stage') {
-                    animId = id;
-                    break;
-                }
-            }
-            
-            if (animId) {
-                this.animationManager.setAnimationCallback(animId, (currentStage, progress) => {
-                    this.stageRenderer.setAnimatedStage(currentStage);
-                    this.updateLayout();
-                    this.requestRender();
-                });
-            }
-            
-            await animation;
-            
-            // Finalizar
+            // Performance: Transição instantânea sem animações pesadas
             this.stageRenderer.setStage(newStage);
-            this.stageRenderer.setAnimating(false);
-            this.updateLayout();
+            
+            // Performance: Preload estágios adjacentes para próximas transições
+            this.preloadAdjacentStagesForAllImages();
+            
+            // Performance: NÃO recalcular layout! Posições são as mesmas
+            // this.updateLayout(); // <- REMOVIDO!
             this.requestRender();
+            
+            console.log(`Stage changed to ${newStage} instantly - NO LAYOUT RECALC`);
         }
     }
 
@@ -142,73 +132,14 @@ class ProceduralZoomViewer {
         this.requestRender();
     }
 
-    async handleReset() {
-        // Animar volta para estágio 1 e posição central
-        const promises = [];
-        
-        if (this.stageRenderer.stage !== 1) {
-            this.stageRenderer.setAnimating(true);
-            const stageAnimation = this.animationManager.animateStageTransition(this.stageRenderer.stage, 1, 400);
-            
-            // Configurar callback para stage
-            setTimeout(() => {
-                let animId = null;
-                for (const [id, anim] of this.animationManager.activeAnimations) {
-                    if (anim.type === 'stage') {
-                        animId = id;
-                        break;
-                    }
-                }
-                
-                if (animId) {
-                    this.animationManager.setAnimationCallback(animId, (currentStage, progress) => {
-                        this.stageRenderer.setAnimatedStage(currentStage);
-                        this.updateLayout();
-                        this.requestRender();
-                    });
-                }
-            }, 10);
-            
-            promises.push(stageAnimation);
-        }
-        
-        const currentX = this.camera.x;
-        const currentY = this.camera.y;
-        const targetX = -this.canvas.width / 2;
-        const targetY = -this.canvas.height / 2;
-        
-        if (currentX !== targetX || currentY !== targetY) {
-            const cameraAnimation = this.animationManager.animateCamera(currentX, currentY, targetX, targetY);
-            
-            // Configurar callback para câmera
-            setTimeout(() => {
-                let animId = null;
-                for (const [id, anim] of this.animationManager.activeAnimations) {
-                    if (anim.type === 'camera') {
-                        animId = id;
-                        break;
-                    }
-                }
-                
-                if (animId) {
-                    this.animationManager.setAnimationCallback(animId, (currentX, currentY, progress) => {
-                        this.camera.setPosition(currentX, currentY);
-                        this.requestRender();
-                    });
-                }
-            }, 10);
-            
-            promises.push(cameraAnimation);
-        }
-        
-        // Aguardar ambas as animações
-        await Promise.all(promises);
-        
+    handleReset() {
+        // Performance: Reset instantâneo
         this.stageRenderer.setStage(1);
-        this.stageRenderer.setAnimating(false);
         this.camera.reset();
-        this.updateLayout();
+        // this.updateLayout(); // <- REMOVIDO! Não precisamos recalcular
         this.requestRender();
+        
+        console.log('Reset to stage 1 and center camera instantly - NO LAYOUT RECALC');
     }
 
     handleImageDoubleClick(imageId) {
@@ -254,6 +185,7 @@ class ProceduralZoomViewer {
 
     /**
      * Atualiza layout baseado no estágio atual
+     * Performance: otimizado para mudanças de stage
      */
     updateLayout() {
         const displaySize = this.stageRenderer.getDisplaySize(this.stageRenderer.isAnimating);
@@ -261,6 +193,12 @@ class ProceduralZoomViewer {
         
         const positions = this.gridLayout.repositionAll(this.imageManager.totalImages);
         this.imageManager.updateImagePositions(positions);
+        
+        // Performance: invalidar cache apenas quando necessário
+        // (mudanças de stage não afetam grid positions, só display size)
+        if (!this.stageRenderer.isAnimating) {
+            this.gridPositions.clear();
+        }
     }
 
     /**
@@ -284,8 +222,9 @@ class ProceduralZoomViewer {
 
     /**
      * Renderização principal
+     * Performance: NUNCA await durante render loop
      */
-    async render() {
+    render() {
         if (this.isRendering) return;
         
         this.isRendering = true;
@@ -302,7 +241,8 @@ class ProceduralZoomViewer {
         // Renderizar canvas base (pixels de cor) primeiro
         this.renderBaseCanvas();
 
-        await this.renderImages();
+        // Performance: renderização síncrona apenas
+        this.renderImages();
         this.renderDebugInfo();
         
         this.performanceMonitor.endRender();
@@ -316,27 +256,32 @@ class ProceduralZoomViewer {
 
     /**
      * Desenha um grid simples no canvas
+     * Performance: Batching de linhas
      */
     drawGrid() {
+        // Performance: Desabilitar grid temporariamente para debug
+        // return;
+        
         const gridSize = 32;
         this.ctx.strokeStyle = '#333';
         this.ctx.lineWidth = 1;
+        this.ctx.beginPath();
 
+        // Performance: Desenhar todas as linhas em um único path
         // Linhas verticais
         for (let x = 0; x <= this.canvas.width; x += gridSize) {
-            this.ctx.beginPath();
             this.ctx.moveTo(x, 0);
             this.ctx.lineTo(x, this.canvas.height);
-            this.ctx.stroke();
         }
 
         // Linhas horizontais
         for (let y = 0; y <= this.canvas.height; y += gridSize) {
-            this.ctx.beginPath();
             this.ctx.moveTo(0, y);
             this.ctx.lineTo(this.canvas.width, y);
-            this.ctx.stroke();
         }
+        
+        // Uma única chamada de stroke para todas as linhas
+        this.ctx.stroke();
     }
 
     /**
@@ -386,54 +331,110 @@ class ProceduralZoomViewer {
 
     /**
      * Renderiza todas as imagens alinhadas ao grid
+     * Performance: Batching de operações canvas + frame limiting
      */
-    async renderImages() {
-        const gridSize = 32;
+    renderImages() {
         let renderedCount = 0;
+        this.frameCounter++;
+        
+        // Performance: configurar canvas UMA vez antes do loop
+        this.ctx.imageSmoothingEnabled = false;
+        
+        // Arrays para batching
+        const imagesToDraw = [];
+        const placeholdersToFill = [];
+        const textsToRender = [];
+        
+        // Performance: limitar imagens por frame se muitas
+        const totalImages = this.imageManager.totalImages;
+        const maxImagesPerFrame = totalImages > 15 ? 10 : 50;
 
-        // Renderizar imagens alinhadas ao grid
+        // FASE 1: Coletar operações (sem executar)
+        let processedCount = 0;
         for (const [imageId, imageInfo] of this.imageManager.getAllImages()) {
-            // Alinhar posição da imagem ao grid
-            const gridX = Math.floor(imageInfo.x / gridSize) * gridSize;
-            const gridY = Math.floor(imageInfo.y / gridSize) * gridSize;
+            // Performance: usar cache de posições
+            let position = this.gridPositions.get(imageId);
+            if (!position) {
+                // Calcular posição apenas uma vez
+                const gridX = Math.floor(imageInfo.x / this.gridSize) * this.gridSize;
+                const gridY = Math.floor(imageInfo.y / this.gridSize) * this.gridSize;
+                const isVisible = gridX >= -this.gridSize && gridX <= this.canvas.width &&
+                                gridY >= -this.gridSize && gridY <= this.canvas.height;
+                
+                position = { gridX, gridY, isVisible };
+                this.gridPositions.set(imageId, position);
+            }
 
-            // Verificar se está visível na tela
-            if (gridX >= -gridSize && gridX <= this.canvas.width &&
-                gridY >= -gridSize && gridY <= this.canvas.height) {
-
-                // Lazy loading
-                if (!this.imageManager.isLoaded(imageId) && !this.imageManager.isLoading(imageId)) {
-                    const loadedImageInfo = await this.imageManager.loadImage(imageId);
-                    if (loadedImageInfo) {
-                        this.stageRenderer.generateStages(imageId, loadedImageInfo);
-                        this.updateUI();
-                    }
+            // Só processar se visível
+            if (position.isVisible) {
+                // Performance: limitar quantas imagens por frame
+                if (processedCount >= maxImagesPerFrame) {
+                    break;
                 }
-
+                
                 const stageCanvas = this.stageRenderer.getStageCanvas(imageId);
                 if (stageCanvas) {
-                    this.ctx.imageSmoothingEnabled = false;
-                    // Renderizar a imagem preenchendo completamente a célula do grid
-                    this.ctx.drawImage(stageCanvas, gridX, gridY, gridSize, gridSize);
-
-                    // Nome da imagem em estágios maiores
-                    if (this.stageRenderer.stage >= 3) {
-                        this.ctx.fillStyle = '#fff';
-                        this.ctx.font = '10px Arial';
-                        this.ctx.fillText(imageInfo.name.substring(0, 10), gridX, gridY - 2);
-                    }
+                    // Coletar imagem para desenhar
+                    imagesToDraw.push({
+                        canvas: stageCanvas,
+                        x: position.gridX,
+                        y: position.gridY,
+                        name: imageInfo.name
+                    });
                 } else {
-                    // Placeholder como quadrado cinza na célula do grid
-                    this.ctx.fillStyle = '#444';
-                    this.ctx.fillRect(gridX, gridY, gridSize, gridSize);
+                    // Coletar placeholder para desenhar
+                    placeholdersToFill.push({
+                        x: position.gridX,
+                        y: position.gridY,
+                        isLoading: this.imageManager.isLoading(imageId)
+                    });
                     
-                    if (this.imageManager.isLoading(imageId)) {
-                        this.ctx.fillStyle = '#666';
-                        this.ctx.fillRect(gridX + 4, gridY + 4, gridSize - 8, gridSize - 8);
-                    }
+                    // Performance: solicitar loading em background (sem await!)
+                    this.requestBackgroundLoad(imageId);
                 }
 
+                processedCount++;
                 renderedCount++;
+            }
+        }
+
+        // FASE 2: Executar operações em batch
+        
+        // Performance: Desenhar imagens com batching ainda mais agressivo
+        if (imagesToDraw.length > 0) {
+            // Otimização: usar todas as mesmas configurações
+            this.ctx.imageSmoothingEnabled = false;
+            
+            for (const img of imagesToDraw) {
+                this.ctx.drawImage(img.canvas, img.x, img.y, this.gridSize, this.gridSize);
+            }
+        }
+        
+        // Debug: contar operações
+        if (imagesToDraw.length > 15) {
+            console.log(`🔍 Stage ${this.stageRenderer.stage}: ${imagesToDraw.length} imagens renderizadas`);
+        }
+
+        // Desenhar todos os placeholders
+        if (placeholdersToFill.length > 0) {
+            this.ctx.fillStyle = '#444';
+            for (const ph of placeholdersToFill) {
+                this.ctx.fillRect(ph.x, ph.y, this.gridSize, this.gridSize);
+                
+                if (ph.isLoading) {
+                    this.ctx.fillStyle = '#666';
+                    this.ctx.fillRect(ph.x + 4, ph.y + 4, this.gridSize - 8, this.gridSize - 8);
+                    this.ctx.fillStyle = '#444'; // Restaurar para próximo placeholder
+                }
+            }
+        }
+
+        // Desenhar textos apenas se necessário (stage >= 3)
+        if (this.stageRenderer.stage >= 3 && imagesToDraw.length > 0) {
+            this.ctx.fillStyle = '#fff';
+            this.ctx.font = '10px Arial';
+            for (const img of imagesToDraw) {
+                this.ctx.fillText(img.name.substring(0, 10), img.x, img.y - 2);
             }
         }
 
@@ -524,6 +525,85 @@ class ProceduralZoomViewer {
             this.camera, 
             this.gridLayout.spacing
         );
+    }
+
+    /**
+     * Performance: Sistema de loading em background
+     */
+    startBackgroundLoader() {
+        this.loadingQueue = new Set();
+        this.isLoadingInBackground = false;
+        
+        // Processar queue a cada 100ms
+        this.backgroundLoader = setInterval(() => {
+            this.processLoadingQueue();
+        }, 100);
+    }
+
+    /**
+     * Performance: Solicita carregamento sem bloquear render
+     */
+    requestBackgroundLoad(imageId) {
+        if (!this.imageManager.isLoaded(imageId) && !this.imageManager.isLoading(imageId)) {
+            this.loadingQueue.add(imageId);
+        }
+    }
+
+    /**
+     * Performance: Processa queue de loading em background
+     */
+    async processLoadingQueue() {
+        if (this.isLoadingInBackground || this.loadingQueue.size === 0) return;
+        
+        this.isLoadingInBackground = true;
+        
+        // Carregar apenas 1 imagem por vez para não sobrecarregar
+        const imageId = this.loadingQueue.values().next().value;
+        this.loadingQueue.delete(imageId);
+        
+        try {
+            const loadedImageInfo = await this.imageManager.loadImage(imageId);
+            if (loadedImageInfo) {
+                this.stageRenderer.generateStages(imageId, loadedImageInfo);
+                
+                // Preload estágios adjacentes
+                this.stageRenderer.preloadAdjacentStages(imageId, this.imageManager);
+                
+                // Solicitar nova renderização (agora que temos nova imagem)
+                this.requestRender();
+            }
+        } catch (error) {
+            console.error('Erro no background loading:', error);
+        } finally {
+            this.isLoadingInBackground = false;
+        }
+    }
+
+    /**
+     * Performance: Preload estágios adjacentes para todas as imagens visíveis
+     */
+    preloadAdjacentStagesForAllImages() {
+        // Usar requestIdleCallback para não bloquear a transição
+        const preloadBatch = () => {
+            let processed = 0;
+            const batchSize = 5; // Processar 5 imagens por vez
+            
+            for (const [imageId, imageInfo] of this.imageManager.getAllImages()) {
+                if (processed >= batchSize) break;
+                
+                // Só precarregar imagens já carregadas
+                if (this.imageManager.isLoaded(imageId)) {
+                    this.stageRenderer.preloadAdjacentStages(imageId, this.imageManager);
+                    processed++;
+                }
+            }
+        };
+
+        if (typeof requestIdleCallback === 'function') {
+            requestIdleCallback(preloadBatch);
+        } else {
+            setTimeout(preloadBatch, 50); // Pequeno delay para não bloquear transição
+        }
     }
 }
 

@@ -8,6 +8,10 @@ export class ImageManager {
         this.loadedImages = new Set(); // IDs carregadas
         this.loadingImages = new Set(); // IDs sendo carregadas
         this.nextImageId = 1;
+        
+        // Micro-otimização: controle de memória
+        this.maxLoadedImages = 30; // Limite de imagens carregadas simultaneamente
+        this.lastUsedTime = new Map(); // Para LRU cache
     }
 
     /**
@@ -69,6 +73,12 @@ export class ImageManager {
 
             this.loadedImages.add(imageId);
             this.loadingImages.delete(imageId);
+            this.lastUsedTime.set(imageId, Date.now());
+
+            // Micro-otimização: limpar imagens antigas se exceder limite
+            if (this.loadedImages.size > this.maxLoadedImages) {
+                this.unloadOldestImages();
+            }
 
             console.log(`Imagem carregada: ${imageInfo.name} (${this.loadedImages.size}/${this.images.size})`);
             
@@ -91,6 +101,7 @@ export class ImageManager {
         imageInfo.loaded = false;
 
         this.loadedImages.delete(imageId);
+        this.lastUsedTime.delete(imageId);
         
         console.log(`Imagem descarregada: ${imageInfo.name} (${this.loadedImages.size}/${this.images.size})`);
     }
@@ -110,6 +121,27 @@ export class ImageManager {
     }
 
     /**
+     * Micro-otimização: Remove imagens mais antigas da memória
+     */
+    unloadOldestImages() {
+        if (this.loadedImages.size <= this.maxLoadedImages) return;
+
+        // Encontrar imagens menos usadas
+        const sortedByUsage = Array.from(this.lastUsedTime.entries())
+            .sort((a, b) => a[1] - b[1]); // Ordenar por timestamp (mais antigo primeiro)
+
+        // Descarregar 30% das imagens mais antigas
+        const toUnload = Math.ceil(this.loadedImages.size * 0.3);
+        
+        for (let i = 0; i < toUnload && i < sortedByUsage.length; i++) {
+            const imageId = sortedByUsage[i][0];
+            this.unloadImage(imageId);
+        }
+
+        console.log(`Memória otimizada: descarregadas ${toUnload} imagens antigas`);
+    }
+
+    /**
      * Remove todas as imagens
      */
     clear() {
@@ -117,6 +149,7 @@ export class ImageManager {
         this.imageFiles.clear();
         this.loadedImages.clear();
         this.loadingImages.clear();
+        this.lastUsedTime.clear();
     }
 
     /**
@@ -156,7 +189,12 @@ export class ImageManager {
     }
 
     getImage(imageId) {
-        return this.images.get(imageId);
+        const imageInfo = this.images.get(imageId);
+        if (imageInfo && imageInfo.loaded) {
+            // Marcar como usado recentemente
+            this.lastUsedTime.set(imageId, Date.now());
+        }
+        return imageInfo;
     }
 
     getAllImages() {
