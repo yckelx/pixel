@@ -1,0 +1,3 @@
+Lazy loading está causando bugs!
+	Caso o usuário mexa muito rápido no canvas, faz com que muitas imagens sejam descarregadas e carregadas, causando lag e as imagens "piscam".
+	Como resolver?
