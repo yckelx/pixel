@@ -78,7 +78,7 @@
     "passport-twitter": "^1.0.4",
     "pug": "^3.0.0",
     "pump": "^1.0.2",
-    "qrcode": "^0.9.0",
+    "qrcode": "^1.5.4",
     "raven": "^2.1.0",
     "speakeasy": "^2.0.0",
     "stream-file-archive": "^1.1.3",
